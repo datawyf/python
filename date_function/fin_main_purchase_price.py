@@ -8,6 +8,7 @@
 import time, MySQLdb
 import dbSetting as db
 import sys
+import datetime
 
 # 建立目标数据库链接
 toconn = MySQLdb.connect(host=db.toDb['ip'], user=db.toDb['user'], passwd=db.toDb['passwd'], db=db.toDb['dbname'],
@@ -18,23 +19,31 @@ if __name__ == "__main__":
     try:
         # 判断脚本是否传入参数
         sys1 = sys.argv[1]
+        print(sys1)
         dt_created_start = "'" + sys1 + "'"
+        python_date_start = datetime.datetime.strptime(sys1, '%Y-%m-%d').date()
         time_created_start = "'" + sys1 + " 00:00:00'"
+
     except:
         dt_created_start = "date_sub(date(now()),interval 30 day)"
-        time_created_start = "concat(date_sub(date(now()),interval 30 day),' 23:59:59')"
+        time_created_start = "concat(date_sub(date(now()),interval 30 day),' 00:00:00')"
+        python_date =datetime.datetime.now()+datetime.timedelta(days=-30)
+        python_date_start = python_date.date()
 
     try:
         sys2 = sys.argv[2]
         dt_created_end = "'" + sys2 + "'"
         time_created_end = "'" + sys2 + " 23:59:59'"
+        python_date_end = datetime.datetime.strptime(sys2, '%Y-%m-%d').date()
     except:
         dt_created_end = "date(now())"
         time_created_end = "concat(date(now()),' 23:59:59')"
+        python_date_end = datetime.datetime.now().date()
+
 
     dt_created_where = "between " + dt_created_start + " and " + dt_created_end
     time_created_where = "between " + time_created_start + " and " + time_created_end
-    print(dt_created_where, time_created_where)
+    print(dt_created_where, time_created_where,python_date_start,python_date_end)
 
     sqls = '''
     drop table if exists dw.fin_main_purchase_price_wtmp;
@@ -50,7 +59,7 @@ if __name__ == "__main__":
     SELECT a.imei,d1.id as id_sku,a.`unit_price` as unit_price,0 as in_type,
             d.`supplier_name`,d1.name as sku_name,c.invoice_type,
             c.tax_rate/10000 as tax_rate,
-            a.`dt_created` 
+            a.`dt_created`
             FROM ods.`airent_tbl_supply_order_detail` a
             LEFT JOIN  ods.`airent_e_purchase_item` b
             ON a.purchase_item_id=b.id
@@ -60,7 +69,7 @@ if __name__ == "__main__":
             ON a.`id_supply_order`=d.`id`
             LEFT JOIN ods.airent_tbl_sku d1
             ON a.id_sku=d1.id
-            WHERE date(a.dt_created) ''' + dt_created_where + ''' 
+            WHERE date(a.dt_created) ''' + dt_created_where + '''
             AND a.quality_status=2
             AND a.status=2;
     '''
@@ -77,7 +86,7 @@ if __name__ == "__main__":
         d.supplier_name,d1.name as sku_name,
         0 as invoice_type,
         0 as tax_rate,
-        b.dt_created 
+        b.dt_created
         FROM ods.airent_tbl_stock_mvt b
         LEFT JOIN ods.airent_tbl_stock b2
         ON b.id_stock=b2.id
@@ -95,44 +104,47 @@ if __name__ == "__main__":
         ON b2.`imei`=m.imei
         WHERE b.dt_created ''' + time_created_where + '''
         and b.id_stock_mvt_reason  IN (13)
-        and m.type=1 and m.status=3 
+        and m.type=1 and m.status=3
     '''
     print(sql)
     tocursor.execute(sql)
     toconn.commit()
-    ## 其他转换单入库数据
-    sql = '''
-        select a.*
-        FROM ods.airent_e_stock_io_record a
-        LEFT JOIN ods.airent_e_after_sale b ON a.receipt_number=b.sn
-        left join dw.fin_main_purchase_price c on b.imei = c.imei and a.dt_created >c.dt_created
-         WHERE a.in_stock_type in (1,2,3,4,6) and a.imei <> b.imei
-         group by a.imei having count(1)>1;
+    ## 其他入库（售后入库类型）插入，仅插入产生新Imei 的数据
+    ## 取转换前imei的最近一次采购价；需要逐天插入数据
+    date_delta = (python_date_end-python_date_start).days
+    for i in range(0,date_delta+1,1):
+        cal_date = python_date_start + datetime.timedelta(days=i)
+        str_cal_date = cal_date.strftime('%Y-%m-%d')
 
-         select a.*,b.imei,c.dt_created
-        FROM ods.airent_e_stock_io_record a
-        LEFT JOIN ods.airent_e_after_sale b ON a.receipt_number=b.sn
-        left join dw.fin_main_purchase_price c on b.imei = c.imei and a.dt_created >c.dt_created
-         WHERE a.in_stock_type in (1,2,3,4,6) and a.imei <> b.imei
-         and a.imei in ('354841092854685','354850095190872')
+        sql = """
+            INSERT INTO `dw`.`fin_main_purchase_price_wtmp`
+            ( `imei`, `id_sku`, `unit_price`, `in_type`, `supplier_name`, `sku_name`, `invoice_type`, `tax_rate`, `dt_created`)
+            select a.imei,c.id_sku,c.unit_price,2 as in_type,c.supplier_name,c.sku_name,c.invoice_type,c.tax_rate,a.`dt_created`
+            FROM ods.airent_e_stock_io_record a
+            LEFT JOIN ods.airent_e_after_sale b ON a.receipt_number=b.sn
+            left join dw.fin_main_purchase_price c on b.imei = c.imei and a.dt_created >c.dt_created
+             WHERE a.in_stock_type in (1,2,3,4,6) and a.imei <> b.imei
+            and a.dt_created between concat( '"""+str_cal_date+"""',' 00:00:00') and concat('"""+str_cal_date+"""',' 23:59:59')
+            and (c.imei,c.dt_created) in (
+            select c.imei,max(c.dt_created)
+            FROM ods.airent_e_stock_io_record a
+            LEFT JOIN ods.airent_e_after_sale b ON a.receipt_number=b.sn
+            left join dw.fin_main_purchase_price c on b.imei = c.imei and a.dt_created >c.dt_created
+             WHERE a.in_stock_type in (1,2,3,4,6) and a.imei <> b.imei
+            and a.dt_created between concat( '"""+str_cal_date+"""',' 00:00:00') and concat('"""+str_cal_date+"""',' 23:59:59')
+            group by c.imei
+            )
+            """
+        # print(sql)
+        tocursor.execute(sql)
+        toconn.commit()
 
-    select *
-from dw.fin_main_purchase_price
-where (imei,dt_created) in (
-SELECT c.imei,max(c.dt_created) as dt_created 
-FROM ods.airent_e_stock_io_record a
-LEFT JOIN ods.airent_e_after_sale b ON a.receipt_number=b.sn
-left join dw.fin_main_purchase_price c on b.imei = c.imei and a.dt_created >c.dt_created
- WHERE a.in_stock_type in (1,2,3,4,6) and a.imei <> b.imei
- group by c.imei)
- '''
-
-    ## 插入前删除
+    # 插入前删除
     sqls = '''
     delete from dw.fin_main_purchase_price where dt_created ''' + time_created_where + ''';
-    insert into dw.fin_main_purchase_price 
+    insert into dw.fin_main_purchase_price
     select *
-    from dw.fin_main_purchase_price_wtmp 
+    from dw.fin_main_purchase_price_wtmp
     '''
     for sql in sqls.split(";"):
         print(sql)
