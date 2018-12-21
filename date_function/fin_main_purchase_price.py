@@ -58,7 +58,8 @@ if __name__ == "__main__":
     INSERT INTO `dw`.`fin_main_purchase_price_wtmp`( `imei`, `id_sku`, `unit_price`, `in_type`, `supplier_name`, `sku_name`, `invoice_type`, `tax_rate`, `dt_created`)
     SELECT a.imei,d1.id as id_sku,a.`unit_price` as unit_price,0 as in_type,
             d.`supplier_name`,d1.name as sku_name,c.invoice_type,
-            c.tax_rate/10000 as tax_rate,
+            CASE WHEN c.invoice_type=2 AND c.dt_created>='2018-05-01' THEN 0.16 WHEN c.invoice_type=2 AND c.dt_created<'2018-05-01' THEN 0.17  ELSE 0 END as tax_rate,
+            -- c.tax_rate/10000 as tax_rate,
             a.`dt_created`
             FROM ods.`airent_tbl_supply_order_detail` a
             LEFT JOIN  ods.`airent_e_purchase_item` b
@@ -144,7 +145,8 @@ if __name__ == "__main__":
     delete from dw.fin_main_purchase_price where dt_created ''' + time_created_where + ''';
     insert into dw.fin_main_purchase_price
     select *
-    from dw.fin_main_purchase_price_wtmp
+    from dw.fin_main_purchase_price_wtmp;
+    drop table if exists dw.fin_main_purchase_price_wtmp
     '''
     for sql in sqls.split(";"):
         print(sql)
